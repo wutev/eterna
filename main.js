@@ -384,7 +384,7 @@ ipcMain.handle('vault:initialize', async (event, masterPassword) => {
     const salt = crypto.randomBytes(encryption.constants.SALT_LENGTH);
 
     // Hash master password for verification (NOT for encryption)
-    const passwordHash = encryption.hashPassword(masterPassword);
+    const passwordHash = encryption.hashPassword(masterPassword, salt);
 
     // Store config (salt and password hash)
     const config = {
@@ -444,7 +444,7 @@ ipcMain.handle('vault:unlock', async (event, masterPassword) => {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
     // Verify master password
-    const passwordHash = encryption.hashPassword(masterPassword);
+    const passwordHash = encryption.hashPassword(masterPassword, config.salt);
     if (passwordHash !== config.passwordHash) {
       rateLimiter.recordFailure();
       // Log failed password attempt
@@ -507,6 +507,33 @@ ipcMain.handle('vault:isUnlocked', async () => {
 });
 
 /**
+ * Completely reset vault (delete all data and config)
+ */
+ipcMain.handle('vault:reset', async () => {
+  try {
+    // Clear session
+    secureSessionKey.clear();
+    isVaultUnlocked = false;
+    auditLog.clearEncryptionKey();
+
+    // Delete vault files
+    if (fs.existsSync(configPath)) {
+      fs.unlinkSync(configPath);
+    }
+    if (fs.existsSync(dataPath)) {
+      fs.unlinkSync(dataPath);
+    }
+    if (fs.existsSync(auditLogPath)) {
+      fs.unlinkSync(auditLogPath);
+    }
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+/**
  * Change master password
  */
 ipcMain.handle('vault:changeMasterPassword', async (event, currentPassword, newPassword) => {
@@ -529,7 +556,7 @@ ipcMain.handle('vault:changeMasterPassword', async (event, currentPassword, newP
     }
 
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    const currentPasswordHash = encryption.hashPassword(currentPassword);
+    const currentPasswordHash = encryption.hashPassword(currentPassword, config.salt);
 
     if (currentPasswordHash !== config.passwordHash) {
       return { success: false, error: 'Current password is incorrect' };
@@ -559,7 +586,7 @@ ipcMain.handle('vault:changeMasterPassword', async (event, currentPassword, newP
 
     // Update config
     config.salt = newSalt.toString('hex');
-    config.passwordHash = encryption.hashPassword(newPassword);
+    config.passwordHash = encryption.hashPassword(newPassword, newSalt);
     config.updatedAt = new Date().toISOString();
 
     // Save everything
@@ -970,8 +997,9 @@ ipcMain.handle('vault:setPrivatePassword', async (event, password) => {
   }
 
   try {
-    // Hash the private section password
-    const hash = encryption.hashPassword(password);
+    // Generate salt and hash the private section password
+    const privateSalt = crypto.randomBytes(encryption.constants.SALT_LENGTH);
+    const hash = encryption.hashPassword(password, privateSalt);
 
     // Load and decrypt current vault
     let vaultData = {};
@@ -988,8 +1016,9 @@ ipcMain.handle('vault:setPrivatePassword', async (event, password) => {
     // Get current data or create new structure
     const currentData = vaultData['eterna-v2'] ? JSON.parse(vaultData['eterna-v2']) : {};
 
-    // Store the hash in the data
+    // Store the hash and salt in the data
     currentData.privatePasswordHash = hash;
+    currentData.privatePasswordSalt = privateSalt.toString('hex');
 
     // Update vault data
     vaultData['eterna-v2'] = JSON.stringify(currentData);
@@ -1047,12 +1076,12 @@ ipcMain.handle('vault:unlockPrivate', async (event, password) => {
     const currentData = vaultData['eterna-v2'] ? JSON.parse(vaultData['eterna-v2']) : {};
 
     // Check if private password is set
-    if (!currentData.privatePasswordHash) {
+    if (!currentData.privatePasswordHash || !currentData.privatePasswordSalt) {
       return { success: false, error: 'Private section not set up' };
     }
 
-    // Hash the provided password and compare
-    const hash = encryption.hashPassword(password);
+    // Hash the provided password with stored salt and compare
+    const hash = encryption.hashPassword(password, currentData.privatePasswordSalt);
     if (hash === currentData.privatePasswordHash) {
       // Reset rate limiter on success
       privateUnlockRateLimiter.reset('private-unlock');

@@ -59,7 +59,10 @@ contextBridge.exposeInMainWorld('vault', {
   // Private Section
   setPrivatePassword: (password) => ipcRenderer.invoke('vault:setPrivatePassword', password),
   unlockPrivate: (password) => ipcRenderer.invoke('vault:unlockPrivate', password),
-  resetPrivate: () => ipcRenderer.invoke('vault:resetPrivate')
+  resetPrivate: () => ipcRenderer.invoke('vault:resetPrivate'),
+
+  // Full vault reset
+  reset: () => ipcRenderer.invoke('vault:reset')
 });
 
 contextBridge.exposeInMainWorld('auditLog', {

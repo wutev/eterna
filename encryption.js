@@ -249,12 +249,31 @@ function validatePasswordStrength(password) {
 }
 
 /**
- * Hash a password for verification (not for encryption)
+ * Hash a password for verification using PBKDF2 (not for encryption)
+ * Uses fewer iterations than key derivation for faster verification
  * @param {string} password - Password to hash
+ * @param {Buffer|string} salt - Salt for hashing (required for security)
  * @returns {string} Hex-encoded hash
  */
-function hashPassword(password) {
-  return crypto.createHash('sha256').update(password).digest('hex');
+function hashPassword(password, salt) {
+  if (!salt) {
+    throw new Error('Salt is required for secure password hashing');
+  }
+
+  // Convert salt to Buffer if it's a hex string
+  const saltBuffer = typeof salt === 'string' ? Buffer.from(salt, 'hex') : salt;
+
+  // Use PBKDF2 with 100,000 iterations for password verification
+  // Fewer than key derivation but still computationally expensive
+  const hash = crypto.pbkdf2Sync(
+    password,
+    saltBuffer,
+    100000,
+    32,
+    'sha256'
+  );
+
+  return hash.toString('hex');
 }
 
 module.exports = {

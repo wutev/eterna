@@ -462,7 +462,8 @@
       showSearchFilters: false,
       updateStatus: null,
       updateVersion: null,
-      updatePercent: 0
+      updatePercent: 0,
+      appVersion: '2.0.1'
     };
 
     // ============ UTILITIES ============
@@ -1606,19 +1607,23 @@
           showConfirm(
             'Are you absolutely sure?',
             'Type the word DELETE in the box below and click confirm to permanently erase everything.',
-            () => {
-              // Actually reset
-              window.storage.delete(STORAGE_KEY);
-              state.data = { ...defaultData };
-              state.masterKey = '';
-              state.setupMode = true;
-              state.locked = true;
-              state.selectedId = null;
-              state.section = 'journal';
-              state.undoStack = [];
-              state.redoStack = [];
-              showToast('Vault has been reset', 'success');
-              render();
+            async () => {
+              // Actually reset - delete vault files on disk
+              const result = await window.vault.reset();
+              if (result.success) {
+                state.data = { ...defaultData };
+                state.masterKey = '';
+                state.setupMode = true;
+                state.locked = true;
+                state.selectedId = null;
+                state.section = 'journal';
+                state.undoStack = [];
+                state.redoStack = [];
+                showToast('Vault has been reset', 'success');
+                render();
+              } else {
+                showToast('Failed to reset vault: ' + result.error, 'error');
+              }
             },
             true
           );
@@ -3001,7 +3006,7 @@
                 </svg>
                 <div>
                   <div style="font-weight: 600; font-size: 16px;">Eterna</div>
-                  <div style="font-size: 12px; color: ${theme.textMuted};">Version 2.0.0</div>
+                  <div style="font-size: 12px; color: ${theme.textMuted};">Version ${state.appVersion}</div>
                 </div>
               </div>
               <div style="font-size: 13px; color: ${theme.textMuted}; line-height: 1.6; margin-bottom: 16px;">
@@ -3071,7 +3076,7 @@
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                   <div>
                     <div style="font-size: 13px; font-weight: 500;">Current Version</div>
-                    <div style="font-size: 12px; color: ${theme.textMuted};">v2.0.0</div>
+                    <div style="font-size: 12px; color: ${theme.textMuted};">v${state.appVersion}</div>
                   </div>
                   <button id="checkUpdatesBtn" style="padding: 8px 16px; background: ${theme.elevated}; border: 1px solid ${theme.border}; border-radius: 6px; color: ${theme.text}; cursor: pointer; font-size: 12px; font-weight: 500;">${state.updateStatus === 'checking' ? 'Checking...' : 'Check for Updates'}</button>
                 </div>
@@ -4106,6 +4111,11 @@
     // ============ INIT ============
     const init = async () => {
       try {
+        // Get app version
+        if (window.appInfo?.getVersion) {
+          state.appVersion = await window.appInfo.getVersion();
+        }
+
         // Check if vault has been initialized
         const { initialized } = await window.vault.isInitialized();
 
