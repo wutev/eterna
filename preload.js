@@ -33,3 +33,37 @@ contextBridge.exposeInMainWorld('autoUpdater', {
     ipcRenderer.on('update-status', (event, data) => callback(data));
   }
 });
+
+contextBridge.exposeInMainWorld('vault', {
+  // Vault initialization and authentication
+  isInitialized: () => ipcRenderer.invoke('vault:isInitialized'),
+  initialize: (masterPassword) => ipcRenderer.invoke('vault:initialize', masterPassword),
+  unlock: (masterPassword) => ipcRenderer.invoke('vault:unlock', masterPassword),
+  lock: () => ipcRenderer.invoke('vault:lock'),
+  isUnlocked: () => ipcRenderer.invoke('vault:isUnlocked'),
+
+  // Master password management
+  changeMasterPassword: (currentPassword, newPassword) =>
+    ipcRenderer.invoke('vault:changeMasterPassword', currentPassword, newPassword),
+  validatePassword: (password) => ipcRenderer.invoke('vault:validatePassword', password),
+  generatePassword: (length, options) => ipcRenderer.invoke('vault:generatePassword', length, options),
+
+  // File encryption
+  encryptFile: (fileData) => ipcRenderer.invoke('vault:encryptFile', fileData),
+  decryptFile: (encryptedFile) => ipcRenderer.invoke('vault:decryptFile', encryptedFile),
+
+  // Export/Import
+  exportBackup: (password) => ipcRenderer.invoke('vault:exportBackup', password),
+  importBackup: (backup, password) => ipcRenderer.invoke('vault:importBackup', backup, password),
+
+  // Private Section
+  setPrivatePassword: (password) => ipcRenderer.invoke('vault:setPrivatePassword', password),
+  unlockPrivate: (password) => ipcRenderer.invoke('vault:unlockPrivate', password),
+  resetPrivate: () => ipcRenderer.invoke('vault:resetPrivate')
+});
+
+contextBridge.exposeInMainWorld('auditLog', {
+  getEntries: (filters) => ipcRenderer.invoke('audit:getEntries', filters),
+  clear: () => ipcRenderer.invoke('audit:clear'),
+  export: () => ipcRenderer.invoke('audit:export')
+});

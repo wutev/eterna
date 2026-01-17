@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; frame-src 'self' data: blob:;">
-  <title>EternaVault</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';">
+  <title>Eterna</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; width: 100%; }
@@ -140,64 +140,7 @@
   <div id="app"></div>
 
   <script>
-    const STORAGE_KEY = 'eternavault-v7';
-
-    // ============ CRYPTO UTILITIES (AES-256-GCM) ============
-    const Crypto = {
-      async deriveKey(password, salt) {
-        // Use PBKDF2 for encryption key derivation (Argon2 for auth only)
-        const enc = new TextEncoder();
-        const keyMaterial = await window.crypto.subtle.importKey(
-          'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']
-        );
-        return window.crypto.subtle.deriveKey(
-          { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
-          keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
-        );
-      },
-
-      async encrypt(data, password) {
-        const enc = new TextEncoder();
-        const salt = window.crypto.getRandomValues(new Uint8Array(16));
-        const iv = window.crypto.getRandomValues(new Uint8Array(12));
-        const key = await this.deriveKey(password, salt);
-        const encrypted = await window.crypto.subtle.encrypt(
-          { name: 'AES-GCM', iv },
-          key,
-          enc.encode(typeof data === 'string' ? data : JSON.stringify(data))
-        );
-        const combined = new Uint8Array(salt.length + iv.length + encrypted.byteLength);
-        combined.set(salt, 0);
-        combined.set(iv, salt.length);
-        combined.set(new Uint8Array(encrypted), salt.length + iv.length);
-        return btoa(String.fromCharCode(...combined));
-      },
-
-      async decrypt(encryptedData, password) {
-        try {
-          const data = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
-          const salt = data.slice(0, 16);
-          const iv = data.slice(16, 28);
-          const encrypted = data.slice(28);
-          const key = await this.deriveKey(password, salt);
-          const decrypted = await window.crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv },
-            key,
-            encrypted
-          );
-          return new TextDecoder().decode(decrypted);
-        } catch (e) {
-          console.error('Decryption failed:', e);
-          return null;
-        }
-      },
-
-      async hashPassword(password) {
-        const enc = new TextEncoder();
-        const hash = await window.crypto.subtle.digest('SHA-256', enc.encode(password + 'eternavault-salt'));
-        return btoa(String.fromCharCode(...new Uint8Array(hash)));
-      }
-    };
+    const STORAGE_KEY = 'eterna-v2';
 
     // ============ TOTP UTILITIES ============
     const TOTP = {
@@ -452,7 +395,7 @@
       passwordFolders: [],
       fileFolders: [],
       settings: {
-        theme: 'moonlight',
+        theme: 'mist',
         fontSize: 14,
         encryptFiles: true,
         enableVersioning: true,
@@ -464,7 +407,10 @@
         compactView: false,
         showPasswordStrength: true,
         confirmDelete: true,
-        sortOrder: 'newest'
+        sortOrder: 'newest',
+        maxFileSizeMB: 50,
+        maxVaultSizeMB: 500,
+        autoUpdate: false
       }
     };
 
@@ -509,6 +455,8 @@
       lockoutUntil: 0,
       undoStack: [],
       redoStack: [],
+      isLoading: false,
+      loadingMessage: '',
       maxHistorySize: 50,
       searchFilter: 'all', // all, today, week, month
       showSearchFilters: false,
@@ -845,6 +793,8 @@
       return total;
     };
 
+    const calculateVaultSize = () => getTotalStorage();
+
     // ============ SAVE / LOAD ============
     let saveTimeout = null;
     const saveData = async () => {
@@ -865,50 +815,122 @@
 
     // ============ ACTIONS ============
     const unlock = async (password) => {
-      // Check if locked out
+      // Check if locked out (frontend)
       if (state.lockoutUntil > Date.now()) {
         const remaining = Math.ceil((state.lockoutUntil - Date.now()) / 1000);
-        showNotification(`Too many failed attempts. Try again in ${remaining}s`, 'error');
+        showToast(`Too many failed attempts. Try again in ${remaining}s`, 'error');
         return false;
       }
 
-      const hash = await Crypto.hashPassword(password);
-      if (hash === state.data.masterPasswordHash) {
-        state.locked = false;
-        state.masterKey = password;
-        state.lastActivity = Date.now();
-        state.failedAttempts = 0;
-        state.lockoutUntil = 0;
-        render();
-        startAutoLockTimer();
-        startTotpTimer();
-        return true;
-      }
+      state.isLoading = true;
+      state.loadingMessage = 'Unlocking vault...';
+      render();
 
-      // Track failed attempts
-      state.failedAttempts++;
-      if (state.failedAttempts >= 5) {
-        // Exponential backoff: 30s, 60s, 120s, 240s...
-        const lockoutSeconds = 30 * Math.pow(2, Math.min(state.failedAttempts - 5, 4));
-        state.lockoutUntil = Date.now() + (lockoutSeconds * 1000);
-        showNotification(`Too many failed attempts. Locked for ${lockoutSeconds}s`, 'error');
+      try {
+        // Use backend vault.unlock
+        const result = await window.vault.unlock(password);
+
+        // Handle backend rate limiting
+        if (result.locked) {
+          const remaining = result.remainingSeconds || 0;
+          showToast(`Too many failed attempts. Try again in ${remaining}s`, 'error');
+          state.lockoutUntil = Date.now() + (remaining * 1000);
+          render();
+          return false;
+        }
+
+        if (result.success) {
+          // Load encrypted data from vault
+          const res = await window.storage.get(STORAGE_KEY);
+          if (res?.success && res.value) {
+            const parsed = JSON.parse(res.value);
+            state.data = {
+              ...defaultData,
+              ...parsed,
+              totp: parsed.totp || [],
+              trash: parsed.trash || [],
+              fileLinks: parsed.fileLinks || [],
+              fileFolders: parsed.fileFolders || [],
+              settings: { ...defaultData.settings, ...(parsed.settings || {}) }
+            };
+            // Apply font size setting on load
+            if (state.data.settings?.fontSize) {
+              document.body.style.fontSize = state.data.settings.fontSize + 'px';
+            }
+          }
+
+          // Don't store master password in renderer memory!
+          state.locked = false;
+          state.lastActivity = Date.now();
+          state.failedAttempts = 0;
+          state.lockoutUntil = 0;
+          render();
+          startAutoLockTimer();
+          startTotpTimer();
+          return true;
+        }
+
+        // Track failed attempts (frontend only)
+        state.failedAttempts++;
+        if (state.failedAttempts >= 5) {
+          // Exponential backoff: 30s, 60s, 120s, 240s...
+          const lockoutSeconds = 30 * Math.pow(2, Math.min(state.failedAttempts - 5, 4));
+          state.lockoutUntil = Date.now() + (lockoutSeconds * 1000);
+          showToast(`Too many failed attempts. Locked for ${lockoutSeconds}s`, 'error');
+        }
+        return false;
+      } finally {
+        state.isLoading = false;
+        state.loadingMessage = '';
+        render();
       }
-      return false;
     };
 
     const setup = async (password) => {
-      state.data.masterPasswordHash = await Crypto.hashPassword(password);
-      state.masterKey = password;
-      state.locked = false;
-      state.setupMode = false;
+      state.isLoading = true;
+      state.loadingMessage = 'Creating vault...';
       render();
-      saveData();
-      startAutoLockTimer();
+
+      try {
+        // Initialize backend vault with master password
+        const result = await window.vault.initialize(password);
+
+        if (!result.success) {
+          console.error('Vault initialization failed:', result.error);
+          return false;
+        }
+
+        // Unlock the vault we just created
+        const unlockResult = await window.vault.unlock(password);
+
+        if (!unlockResult.success) {
+          console.error('Vault unlock failed:', unlockResult.error);
+          return false;
+        }
+
+        // Don't store master password in renderer memory!
+        state.locked = false;
+        state.setupMode = false;
+        render();
+        saveData();
+        startAutoLockTimer();
+        return true;
+      } catch (err) {
+        console.error('Exception during setup:', err);
+        return false;
+      } finally {
+        state.isLoading = false;
+        state.loadingMessage = '';
+        render();
+      }
     };
 
-    const lock = () => {
+    const lock = async () => {
+      // Lock backend vault (clears encryption key from memory)
+      await window.vault.lock();
+
       // Securely clear sensitive data from memory
-      state.masterKey = secureClear.string(state.masterKey);
+      // masterKey no longer stored in renderer!
       state.privateKey = secureClear.string(state.privateKey);
       state.totpCodes = secureClear.totpCodes(state.totpCodes);
 
@@ -929,10 +951,10 @@
 
     const startAutoLockTimer = () => {
       if (state.autoLockInterval) clearInterval(state.autoLockInterval);
-      state.autoLockInterval = setInterval(() => {
+      state.autoLockInterval = setInterval(async () => {
         const minutes = state.data.settings?.autoLockMinutes || 5;
         if (Date.now() - state.lastActivity > minutes * 60 * 1000) {
-          lock();
+          await lock();
         }
       }, 10000);
     };
@@ -1144,54 +1166,88 @@
     };
 
     const setupPrivatePassword = async () => {
-      const password = document.getElementById('privatePasswordInput')?.value;
-      const confirm = document.getElementById('privatePasswordConfirm')?.value;
-      if (!password || password.length < 4) {
-        showNotification('Password must be at least 4 characters', 'error');
-        return;
+      try {
+        const password = document.getElementById('privatePasswordInput')?.value;
+        const confirm = document.getElementById('privatePasswordConfirm')?.value;
+        if (!password) {
+          showToast('Password required', 'error');
+          return;
+        }
+        if (password !== confirm) {
+          showToast('Passwords do not match', 'error');
+          return;
+        }
+        // Use backend vault to set private password
+        const result = await window.vault.setPrivatePassword(password);
+        if (!result.success) {
+          console.error('Failed to set private password:', result.error, result.details);
+          showToast(result.error || 'Failed to set password', 'error');
+          return;
+        }
+        // Reload full data from backend to sync state (backend saved the hash)
+        const res = await window.storage.get(STORAGE_KEY);
+        if (res?.success && res.value) {
+          const parsed = JSON.parse(res.value);
+          // Merge backend data into state to get the real hash
+          state.data = { ...state.data, ...parsed };
+        }
+        state.privateLocked = false;
+        state.privateKey = ''; // Don't store password in renderer
+        saveData(); // Save merged state to persist everything
+        render();
+        showToast('Private section password set', 'success');
+      } catch (error) {
+        console.error('Error setting up private password:', error);
+        showToast('Failed to set password: ' + error.message, 'error');
       }
-      if (password !== confirm) {
-        showNotification('Passwords do not match', 'error');
-        return;
-      }
-      const hash = await Crypto.hashPassword(password);
-      state.data.privatePasswordHash = hash;
-      state.privateLocked = false;
-      state.privateKey = password;
-      saveData();
-      render();
-      showNotification('Private section password set', 'success');
     };
 
     const unlockPrivate = async () => {
-      const password = document.getElementById('privatePasswordInput')?.value;
-      if (!password) {
-        showNotification('Please enter your password', 'error');
-        return;
+      try {
+        const password = document.getElementById('privatePasswordInput')?.value;
+        if (!password) {
+          showToast('Please enter your password', 'error');
+          return;
+        }
+        // Use backend vault to unlock private section
+        const result = await window.vault.unlockPrivate(password);
+        if (result.success) {
+          state.privateLocked = false;
+          state.privateKey = ''; // Don't store password in renderer
+          render();
+          showToast('Private section unlocked', 'success');
+          return;
+        }
+        showToast('Incorrect password', 'error');
+      } catch (error) {
+        console.error('Error unlocking private section:', error);
+        showToast('Failed to unlock private section', 'error');
       }
-      const hash = await Crypto.hashPassword(password);
-      if (hash === state.data.privatePasswordHash) {
-        state.privateLocked = false;
-        state.privateKey = password;
-        render();
-        showNotification('Private section unlocked', 'success');
-        return;
-      }
-      showNotification('Incorrect password', 'error');
     };
 
-    const resetPrivateSection = () => {
-      showConfirm('Reset Private Section?', 'This will permanently delete all private notes and reset the password. This cannot be undone.', () => {
-        state.data.notes = [];
-        state.data.noteFolders = [];
-        state.data.privatePasswordHash = null;
-        state.privateLocked = true;
-        state.privateKey = '';
-        state.selectedId = null;
-        state.selectedFolder = null;
-        saveData();
-        render();
-        showNotification('Private section has been reset', 'success');
+    const resetPrivateSection = async () => {
+      showConfirm('Reset Private Section?', 'This will permanently delete all private notes and reset the password. This cannot be undone.', async () => {
+        try {
+          // Use backend vault to reset private password
+          const result = await window.vault.resetPrivate();
+          if (!result.success) {
+            showToast('Failed to reset private section', 'error');
+            return;
+          }
+          state.data.notes = [];
+          state.data.noteFolders = [];
+          state.data.privatePasswordHash = null;
+          state.privateLocked = true;
+          state.privateKey = '';
+          state.selectedId = null;
+          state.selectedFolder = null;
+          saveData();
+          render();
+          showToast('Private section has been reset', 'success');
+        } catch (error) {
+          console.error('Error resetting private section:', error);
+          showToast('Failed to reset private section', 'error');
+        }
       });
     };
 
@@ -1268,45 +1324,111 @@
     };
 
     // ============ FILE OPERATIONS ============
+    const DANGEROUS_FILE_TYPES = ['.exe', '.bat', '.cmd', '.sh', '.dll', '.so', '.dylib', '.app', '.vbs', '.ps1', '.scr', '.msi'];
+
+    const getMaxFileSize = () => (state.data.settings?.maxFileSizeMB || 50) * 1024 * 1024;
+    const getMaxVaultSize = () => (state.data.settings?.maxVaultSizeMB || 500) * 1024 * 1024;
+
     const processFiles = async (fileList, forJournal = false) => {
       const files = Array.from(fileList);
+      let filesProcessed = 0;
+      let filesSkipped = 0;
+      const maxFileSize = getMaxFileSize();
+      const maxVaultSize = getMaxVaultSize();
+
       for (const file of files) {
+        // File size validation
+        if (file.size > maxFileSize) {
+          showToast(`File "${file.name}" exceeds maximum size of ${state.data.settings?.maxFileSizeMB || 50}MB`, 'error');
+          filesSkipped++;
+          continue;
+        }
+
+        // Check vault size limit
+        const totalVaultSize = calculateVaultSize();
+        if (totalVaultSize + file.size > maxVaultSize) {
+          showToast(`Adding this file would exceed vault size limit of ${state.data.settings?.maxVaultSizeMB || 500}MB`, 'warning');
+          filesSkipped++;
+          continue;
+        }
+
+        // Warn about potentially dangerous file types
+        const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+        if (DANGEROUS_FILE_TYPES.includes(fileExt)) {
+          showToast(`Warning: ${fileExt} files could be executable. Use caution.`, 'warning');
+        }
+
         const reader = new FileReader();
         reader.onload = async (ev) => {
-          let fileData = ev.target.result;
+          try {
+            let fileData = ev.target.result;
 
-          if (forJournal && getSelected()) {
-            const image = { id: generateId(), name: file.name, data: fileData, created: Date.now() };
-            state.data.journal = state.data.journal.map(j =>
-              j.id === state.selectedId ? { ...j, images: [...(j.images || []), image] } : j
-            );
-          } else {
-            if (state.data.settings?.encryptFiles && state.masterKey) {
-              fileData = await Crypto.encrypt(fileData, state.masterKey);
+            if (forJournal && getSelected()) {
+              const image = { id: generateId(), name: file.name, data: fileData, created: Date.now() };
+              state.data.journal = state.data.journal.map(j =>
+                j.id === state.selectedId ? { ...j, images: [...(j.images || []), image] } : j
+              );
+            } else {
+              // Use backend encryption for files
+              let finalFileData = fileData;
+              let isEncrypted = false;
+
+              if (state.data.settings?.encryptFiles) {
+                const result = await window.vault.encryptFile(fileData);
+                if (result.success) {
+                  finalFileData = result.encrypted;
+                  isEncrypted = true;
+                } else {
+                  showToast(`Failed to encrypt "${file.name}". File not added.`, 'error');
+                  console.error('File encryption failed:', result.error);
+                  return;
+                }
+              }
+
+              const item = {
+                id: generateId(),
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                data: finalFileData,
+                encrypted: isEncrypted,
+                created: Date.now(),
+                folderId: state.selectedFolder || null
+              };
+              state.data.files = [item, ...state.data.files];
             }
-            const item = {
-              id: generateId(),
-              name: file.name,
-              type: file.type,
-              size: file.size,
-              data: fileData,
-              encrypted: state.data.settings?.encryptFiles || false,
-              created: Date.now(),
-              folderId: state.selectedFolder || null
-            };
-            state.data.files = [item, ...state.data.files];
+            filesProcessed++;
+            render();
+            saveData();
+          } catch (error) {
+            console.error('Error processing file:', error);
+            showToast(`Failed to process "${file.name}"`, 'error');
           }
-          render();
-          saveData();
+        };
+        reader.onerror = () => {
+          showToast(`Failed to read "${file.name}"`, 'error');
+          filesSkipped++;
         };
         reader.readAsDataURL(file);
+      }
+
+      // Show summary if multiple files
+      if (files.length > 1) {
+        setTimeout(() => {
+          if (filesProcessed > 0) {
+            showToast(`Uploaded ${filesProcessed} file(s)${filesSkipped > 0 ? `, skipped ${filesSkipped}` : ''}`, 'success');
+          }
+        }, 500);
       }
     };
 
     const getFileData = async (file) => {
-      if (file.encrypted && state.masterKey) {
-        const decrypted = await Crypto.decrypt(file.data, state.masterKey);
-        return decrypted || file.data;
+      // Use backend decryption for files
+      if (file.encrypted) {
+        const result = await window.vault.decryptFile(file.data);
+        if (result.success) {
+          return result.data;
+        }
       }
       return file.data;
     };
@@ -1382,13 +1504,24 @@
         let content, filename, type;
 
         if (encrypt && password) {
-          const encrypted = await Crypto.encrypt(JSON.stringify(state.data), password);
-          content = JSON.stringify({ encrypted: true, version: 1, data: encrypted }, null, 2);
-          filename = `eternavault-backup-encrypted-${dateStr}.json`;
+          // Use backend encryption for export
+          const result = await window.vault.exportBackup(password);
+          if (!result.success) {
+            showToast('Export failed', 'error');
+            return;
+          }
+          content = JSON.stringify(result.backup, null, 2);
+          filename = `eterna-backup-encrypted-${dateStr}.json`;
           type = 'application/json';
         } else {
-          content = JSON.stringify(state.data, null, 2);
-          filename = `eternavault-backup-${dateStr}.json`;
+          // Unencrypted export
+          const result = await window.vault.exportBackup(null);
+          if (!result.success) {
+            showToast('Export failed', 'error');
+            return;
+          }
+          content = JSON.stringify(result.backup.data, null, 2);
+          filename = `eterna-backup-${dateStr}.json`;
           type = 'application/json';
         }
 
@@ -1446,13 +1579,14 @@
 
     const doImportEncrypted = async (encryptedData, password) => {
       try {
-        const decrypted = await Crypto.decrypt(encryptedData, password);
-        if (!decrypted) {
-          showToast('Incorrect password', 'error');
+        // Use backend decryption for import
+        const result = await window.vault.importBackup(encryptedData, password);
+        if (!result.success) {
+          showToast('Incorrect password or corrupted backup', 'error');
           return;
         }
 
-        const parsed = JSON.parse(decrypted);
+        const parsed = result.data;
         state.data = { ...defaultData, ...parsed, settings: { ...defaultData.settings, ...(parsed.settings || {}) } };
         state.showModal = null;
         render();
@@ -1932,6 +2066,31 @@
           }
         }
       }
+
+      // Render loading overlay if needed
+      if (state.isLoading) {
+        const loadingOverlay = document.createElement('div');
+        loadingOverlay.id = 'loadingOverlay';
+        loadingOverlay.innerHTML = `
+          <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 10000; backdrop-filter: blur(4px);">
+            <div style="text-align: center;">
+              <div style="font-size: 48px; margin-bottom: 16px; animation: spin 1s linear infinite;">⟳</div>
+              <div style="font-size: 16px; color: white; font-weight: 500;">${state.loadingMessage || 'Loading...'}</div>
+            </div>
+          </div>
+          <style>
+            @keyframes spin {
+              from { transform: rotate(0deg); }
+              to { transform: rotate(360deg); }
+            }
+          </style>
+        `;
+        document.body.appendChild(loadingOverlay);
+      } else {
+        // Remove loading overlay if it exists
+        const existingOverlay = document.getElementById('loadingOverlay');
+        if (existingOverlay) existingOverlay.remove();
+      }
     };
 
     const renderLockScreen = (theme) => {
@@ -1940,22 +2099,24 @@
 
       return `
       <div class="titlebar" style="position: fixed; top: 0; left: 0; right: 0; height: 40px; background: transparent; display: flex; justify-content: flex-end; align-items: center; padding-right: 8px; z-index: 100;">
-        <div class="window-controls">
-          <button id="minimizeBtn" class="window-control-btn minimize" style="background: transparent;">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}"><rect y="5" width="12" height="2"/></svg>
+        <div class="window-controls" role="group" aria-label="Window controls">
+          <button id="minimizeBtn" class="window-control-btn minimize" aria-label="Minimize window" style="background: transparent;">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}" aria-hidden="true"><rect y="5" width="12" height="2"/></svg>
           </button>
-          <button id="maximizeBtn" class="window-control-btn maximize" style="background: transparent;">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="${theme.textMuted}" stroke-width="1.5"><rect x="1" y="1" width="10" height="10" rx="1"/></svg>
+          <button id="maximizeBtn" class="window-control-btn maximize" aria-label="Maximize window" style="background: transparent;">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="${theme.textMuted}" stroke-width="1.5" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="1"/></svg>
           </button>
-          <button id="closeBtn" class="window-control-btn close" style="background: transparent;">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}"><path d="M1 1L11 11M11 1L1 11" stroke="${theme.textMuted}" stroke-width="1.5"/></svg>
+          <button id="closeBtn" class="window-control-btn close" aria-label="Close window" style="background: transparent;">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}" aria-hidden="true"><path d="M1 1L11 11M11 1L1 11" stroke="${theme.textMuted}" stroke-width="1.5"/></svg>
           </button>
         </div>
       </div>
       <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center;">
         <div style="width: 380px; padding: 48px 40px; background: ${theme.surface}; border-radius: 16px; border: 1px solid ${theme.border};">
           <div style="text-align: center; margin-bottom: 36px;">
-            <div style="width: 48px; height: 48px; background: ${isLockedOut ? theme.danger : theme.accent}; border-radius: 12px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 20px; color: #fff; font-weight: 600;">${isLockedOut ? '🔒' : 'M'}</div>
+            <div style="width: 48px; height: 48px; background: ${isLockedOut ? theme.danger : theme.accent}; border-radius: 12px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
+              ${isLockedOut ? '<span style="font-size: 20px;">🔒</span>' : '<svg width="28" height="28" viewBox="0 0 100 100" fill="none"><path d="M 15 50 C 15 30, 30 20, 42 20 C 54 20, 60 35, 60 50 C 60 65, 54 80, 42 80 C 30 80, 15 70, 15 50 M 60 50 C 60 35, 66 20, 78 20 C 90 20, 105 30, 105 50 C 105 70, 90 80, 78 80 C 66 80, 60 65, 60 50" transform="translate(-10, 0)" fill="none" stroke="white" stroke-width="10" stroke-linecap="round"/></svg>'}
+            </div>
             <div style="font-size: 22px; font-weight: 600; color: ${theme.text}; margin-bottom: 8px;">
               ${isLockedOut ? 'Vault Locked' : state.setupMode ? 'Create Your Vault' : 'Welcome Back'}
             </div>
@@ -1970,11 +2131,11 @@
             </div>
           ` : `
             <div style="margin-bottom: 16px;">
-              <input type="password" id="passInput" placeholder="Master password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px;" autofocus />
+              <input type="password" id="passInput" placeholder="Master password" autocomplete="current-password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px;" autofocus />
             </div>
             ${state.setupMode ? `
               <div style="margin-bottom: 16px;">
-                <input type="password" id="passConfirm" placeholder="Confirm password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px;" />
+                <input type="password" id="passConfirm" placeholder="Confirm password" autocomplete="new-password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px;" />
               </div>
             ` : ''}
             <div id="passError" style="display: none; padding: 10px 14px; background: ${theme.danger}15; border-radius: 8px; color: ${theme.danger}; font-size: 13px; margin-bottom: 16px;"></div>
@@ -1987,9 +2148,6 @@
               </div>
             ` : ''}
           `}
-          <div style="margin-top: 16px; text-align: center; font-size: 11px; color: ${theme.textFaint};">
-            AES-256-GCM encrypted
-          </div>
         </div>
       </div>
     `;
@@ -2014,39 +2172,45 @@
 
         <div class="titlebar" style="position: sticky; top: 0; background: ${theme.surface}; border-bottom: 1px solid ${theme.border}; padding: 8px 12px 8px 16px; display: flex; align-items: center; justify-content: space-between; z-index: 100;">
           <div style="display: flex; align-items: center; gap: 24px;">
-            <div style="font-size: 16px; font-weight: 700; color: ${theme.accent}; letter-spacing: -0.02em;">EternaVault</div>
-            <div style="display: flex; gap: 2px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <svg width="28" height="28" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M 15 50 C 15 30, 30 20, 42 20 C 54 20, 60 35, 60 50 C 60 65, 54 80, 42 80 C 30 80, 15 70, 15 50 M 60 50 C 60 35, 66 20, 78 20 C 90 20, 105 30, 105 50 C 105 70, 90 80, 78 80 C 66 80, 60 65, 60 50" transform="translate(-10, 0)" fill="none" stroke="${theme.accent}" stroke-width="10" stroke-linecap="round"/>
+              </svg>
+              <div style="font-size: 16px; font-weight: 700; color: ${theme.accent}; letter-spacing: -0.02em;">Eterna</div>
+            </div>
+            <nav role="navigation" aria-label="Main navigation" style="display: flex; gap: 2px;">
               ${['journal', 'notes', 'passwords', 'totp', 'files', 'settings'].map(s => {
                 const count = s !== 'settings' ? getItemCount(s) : 0;
                 const label = s === 'totp' ? '2FA' : s === 'notes' ? 'Private' : s;
+                const ariaLabel = `${label} section${count > 0 ? `, ${count} items` : ''}${state.section === s ? ', selected' : ''}`;
                 return `
-                <button class="nav-btn" data-section="${s}" style="padding: 6px 12px; background: ${state.section === s ? theme.accent + '18' : 'transparent'}; border: none; border-radius: 5px; color: ${state.section === s ? theme.accent : theme.textMuted}; cursor: pointer; font-size: 12px; font-weight: 500; text-transform: capitalize; display: flex; align-items: center; gap: 4px;">
+                <button class="nav-btn" data-section="${s}" role="tab" aria-label="${ariaLabel}" aria-selected="${state.section === s}" style="padding: 6px 12px; background: ${state.section === s ? theme.accent + '18' : 'transparent'}; border: none; border-radius: 5px; color: ${state.section === s ? theme.accent : theme.textMuted}; cursor: pointer; font-size: 12px; font-weight: 500; text-transform: capitalize; display: flex; align-items: center; gap: 4px;">
                   ${label}${count > 0 ? `<span style="font-size: 10px; opacity: 0.6;">(${count})</span>` : ''}
                 </button>
               `;}).join('')}
-            </div>
+            </nav>
           </div>
           <div style="display: flex; align-items: center; gap: 12px;">
             <div class="online-indicator ${state.isOnline ? 'online' : 'offline'}" style="font-size: 11px;">
               <div class="online-dot ${state.isOnline ? 'online' : 'offline'}"></div>
               ${state.isOnline ? 'Online' : 'Offline'}
             </div>
-            <button id="lockBtn" style="padding: 6px 12px; background: ${theme.danger}15; border: none; border-radius: 6px; color: ${theme.danger}; cursor: pointer; font-size: 12px; font-weight: 500;">Lock</button>
-            <div class="window-controls">
-              <button id="minimizeBtn" class="window-control-btn minimize" style="background: transparent;">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}"><rect y="5" width="12" height="2"/></svg>
+            <button id="lockBtn" aria-label="Lock vault" style="padding: 6px 12px; background: ${theme.danger}15; border: none; border-radius: 6px; color: ${theme.danger}; cursor: pointer; font-size: 12px; font-weight: 500;">Lock</button>
+            <div class="window-controls" role="group" aria-label="Window controls">
+              <button id="minimizeBtn" class="window-control-btn minimize" aria-label="Minimize window" style="background: transparent;">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}" aria-hidden="true"><rect y="5" width="12" height="2"/></svg>
               </button>
-              <button id="maximizeBtn" class="window-control-btn maximize" style="background: transparent;">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="${theme.textMuted}" stroke-width="1.5"><rect x="1" y="1" width="10" height="10" rx="1"/></svg>
+              <button id="maximizeBtn" class="window-control-btn maximize" aria-label="Maximize window" style="background: transparent;">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="${theme.textMuted}" stroke-width="1.5" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="1"/></svg>
               </button>
-              <button id="closeBtn" class="window-control-btn close" style="background: transparent;">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}"><path d="M1 1L11 11M11 1L1 11" stroke="${theme.textMuted}" stroke-width="1.5"/></svg>
+              <button id="closeBtn" class="window-control-btn close" aria-label="Close window" style="background: transparent;">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="${theme.textMuted}" aria-hidden="true"><path d="M1 1L11 11M11 1L1 11" stroke="${theme.textMuted}" stroke-width="1.5"/></svg>
               </button>
             </div>
           </div>
         </div>
 
-        <div style="display: flex; height: calc(100vh - 49px); overflow: hidden;">
+        <div role="main" style="display: flex; height: calc(100vh - 49px); overflow: hidden;">
           ${state.section !== 'settings' ? renderSidebar(theme, items, folders, selected) : ''}
           ${renderDetail(theme, selected)}
         </div>
@@ -2327,8 +2491,8 @@
             <div style="font-size: 13px; color: ${theme.textMuted}; margin-bottom: 24px;">
               ${hasPassword ? 'Enter your private password to access your secure notes.' : 'Set up a separate password to protect your private notes.'}
             </div>
-            <input type="password" id="privatePasswordInput" placeholder="${hasPassword ? 'Private password' : 'Create private password'}" style="width: 100%; padding: 12px 16px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px; text-align: center;" />
-            ${!hasPassword ? `<input type="password" id="privatePasswordConfirm" placeholder="Confirm password" style="width: 100%; padding: 12px 16px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px; text-align: center;" />` : ''}
+            <input type="password" id="privatePasswordInput" placeholder="${hasPassword ? 'Private password' : 'Create private password'}" autocomplete="${hasPassword ? 'current-password' : 'new-password'}" style="width: 100%; padding: 12px 16px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px; text-align: center;" />
+            ${!hasPassword ? `<input type="password" id="privatePasswordConfirm" placeholder="Confirm password" autocomplete="new-password" style="width: 100%; padding: 12px 16px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px; text-align: center;" />` : ''}
             <button id="unlockPrivateBtn" style="width: 100%; padding: 12px 16px; background: ${theme.accent}; border: none; border-radius: 8px; color: #fff; cursor: pointer; font-size: 14px; font-weight: 500; margin-bottom: 16px;">
               ${hasPassword ? 'Unlock Private' : 'Set Password'}
             </button>
@@ -2562,7 +2726,7 @@
       const isPdf = selected.name?.toLowerCase().endsWith('.pdf');
       
       return `
-        <div style="flex: 1; display: flex; flex-direction: column;">
+        <div id="fileDetailDropZone" style="flex: 1; display: flex; flex-direction: column;">
           <div style="padding: 10px 20px; border-bottom: 1px solid ${theme.border}; display: flex; justify-content: space-between; align-items: center; background: ${theme.surface};">
             <div style="font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 8px;">
               <span style="font-size: 20px;">${iconData.icon}</span>
@@ -2691,6 +2855,28 @@
                 </div>
                 <input type="checkbox" id="encryptFilesCheck" ${state.data.settings?.encryptFiles ? 'checked' : ''} style="accent-color: ${theme.accent}; width: 18px; height: 18px;" />
               </label>
+              <div style="margin-bottom: 16px;">
+                <div style="font-weight: 500; margin-bottom: 8px;">Max File Size</div>
+                <div style="font-size: 12px; color: ${theme.textMuted}; margin-bottom: 8px;">Maximum size for individual file uploads</div>
+                <select id="maxFileSizeSelect" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; cursor: pointer;">
+                  <option value="10" ${state.data.settings?.maxFileSizeMB === 10 ? 'selected' : ''}>10 MB</option>
+                  <option value="25" ${state.data.settings?.maxFileSizeMB === 25 ? 'selected' : ''}>25 MB</option>
+                  <option value="50" ${state.data.settings?.maxFileSizeMB === 50 || !state.data.settings?.maxFileSizeMB ? 'selected' : ''}>50 MB (Default)</option>
+                  <option value="100" ${state.data.settings?.maxFileSizeMB === 100 ? 'selected' : ''}>100 MB</option>
+                  <option value="250" ${state.data.settings?.maxFileSizeMB === 250 ? 'selected' : ''}>250 MB</option>
+                </select>
+              </div>
+              <div style="margin-bottom: 16px;">
+                <div style="font-weight: 500; margin-bottom: 8px;">Max Vault Size</div>
+                <div style="font-size: 12px; color: ${theme.textMuted}; margin-bottom: 8px;">Maximum total size of all stored data</div>
+                <select id="maxVaultSizeSelect" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; cursor: pointer;">
+                  <option value="100" ${state.data.settings?.maxVaultSizeMB === 100 ? 'selected' : ''}>100 MB</option>
+                  <option value="250" ${state.data.settings?.maxVaultSizeMB === 250 ? 'selected' : ''}>250 MB</option>
+                  <option value="500" ${state.data.settings?.maxVaultSizeMB === 500 || !state.data.settings?.maxVaultSizeMB ? 'selected' : ''}>500 MB (Default)</option>
+                  <option value="1000" ${state.data.settings?.maxVaultSizeMB === 1000 ? 'selected' : ''}>1 GB</option>
+                  <option value="2000" ${state.data.settings?.maxVaultSizeMB === 2000 ? 'selected' : ''}>2 GB</option>
+                </select>
+              </div>
               <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
                 <div>
                   <div style="font-weight: 500;">Show Password Strength</div>
@@ -2764,6 +2950,23 @@
             </div>
           </div>
 
+          <!-- Audit Log Section -->
+          <div style="margin-bottom: 32px;">
+            <div style="font-size: 11px; color: ${theme.textMuted}; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 14px; font-weight: 600;">Security Audit Log</div>
+            <div style="padding: 20px; background: ${theme.surface}; border-radius: 12px; border: 1px solid ${theme.border};">
+              <div style="font-weight: 500; margin-bottom: 8px;">Activity Monitor</div>
+              <div style="font-size: 12px; color: ${theme.textMuted}; margin-bottom: 12px;">Track security events and access history</div>
+              <div style="display: flex; gap: 10px; margin-bottom: 16px;">
+                <button id="viewAuditLogBtn" style="flex: 1; padding: 10px 16px; background: ${theme.accent}; border: none; border-radius: 8px; color: #fff; cursor: pointer; font-size: 13px; font-weight: 500;">View Audit Log</button>
+                <button id="exportAuditLogBtn" style="flex: 1; padding: 10px 16px; background: ${theme.elevated}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; cursor: pointer; font-size: 13px; font-weight: 500;">Export Log</button>
+                <button id="clearAuditLogBtn" style="flex: 1; padding: 10px 16px; background: ${theme.danger}20; border: 1px solid ${theme.danger}50; border-radius: 8px; color: ${theme.danger}; cursor: pointer; font-size: 13px; font-weight: 500;">Clear Log</button>
+              </div>
+              <div style="font-size: 11px; color: ${theme.textFaint}; line-height: 1.5;">
+                The audit log tracks vault unlocks, password changes, failed login attempts, and other security-relevant events. All logs are encrypted with your vault key.
+              </div>
+            </div>
+          </div>
+
           <!-- Stats Section -->
           <div style="margin-bottom: 32px;">
             <div style="font-size: 11px; color: ${theme.textMuted}; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 14px; font-weight: 600;">Vault Statistics</div>
@@ -2793,27 +2996,35 @@
             <div style="font-size: 11px; color: ${theme.textMuted}; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 14px; font-weight: 600;">About</div>
             <div style="padding: 20px; background: ${theme.surface}; border-radius: 12px; border: 1px solid ${theme.border};">
               <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
-                <div style="width: 48px; height: 48px; background: linear-gradient(135deg, ${theme.accent}, ${theme.accent}dd); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; color: #fff; font-weight: 700; box-shadow: 0 4px 12px ${theme.accent}40;">E</div>
+                <svg width="48" height="48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" style="border-radius: 12px; box-shadow: 0 4px 12px ${theme.accent}40; background: ${theme.accent}; padding: 8px;">
+                  <path d="M 15 50 C 15 30, 30 20, 42 20 C 54 20, 60 35, 60 50 C 60 65, 54 80, 42 80 C 30 80, 15 70, 15 50 M 60 50 C 60 35, 66 20, 78 20 C 90 20, 105 30, 105 50 C 105 70, 90 80, 78 80 C 66 80, 60 65, 60 50" transform="translate(-10, 0)" fill="none" stroke="white" stroke-width="8" stroke-linecap="round" opacity="0.95"/>
+                </svg>
                 <div>
-                  <div style="font-weight: 600; font-size: 16px;">EternaVault</div>
-                  <div style="font-size: 12px; color: ${theme.textMuted};">Version 1.0.0</div>
+                  <div style="font-weight: 600; font-size: 16px;">Eterna</div>
+                  <div style="font-size: 12px; color: ${theme.textMuted};">Version 2.0.0</div>
                 </div>
               </div>
               <div style="font-size: 13px; color: ${theme.textMuted}; line-height: 1.6; margin-bottom: 16px;">
-                Your personal fortress for digital privacy. EternaVault keeps your most sensitive information protected with military-grade AES-256-GCM encryption.
+                A secure, offline-first vault for your passwords, journals, 2FA codes, and sensitive files. Built with AES-256-GCM encryption and PBKDF2 key derivation to keep your data protected.
               </div>
-              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; font-size: 12px;">
+              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; font-size: 12px;">
                 <div style="display: flex; align-items: center; gap: 8px; color: ${theme.textMuted};">
-                  <span style="color: ${theme.accent};">*</span> End-to-end encryption
+                  <span style="color: ${theme.accent};">&#10003;</span> AES-256-GCM Encryption
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px; color: ${theme.textMuted};">
-                  <span style="color: ${theme.accent};">*</span> Offline-first design
+                  <span style="color: ${theme.accent};">&#10003;</span> 310,000 PBKDF2 Iterations
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px; color: ${theme.textMuted};">
-                  <span style="color: ${theme.accent};">*</span> TOTP authenticator
+                  <span style="color: ${theme.accent};">&#10003;</span> TOTP Authenticator
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px; color: ${theme.textMuted};">
-                  <span style="color: ${theme.accent};">*</span> Zero cloud dependency
+                  <span style="color: ${theme.accent};">&#10003;</span> Local Storage Only
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; color: ${theme.textMuted};">
+                  <span style="color: ${theme.accent};">&#10003;</span> Rate-Limited Auth
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; color: ${theme.textMuted};">
+                  <span style="color: ${theme.accent};">&#10003;</span> Encrypted Audit Log
                 </div>
               </div>
             </div>
@@ -2827,7 +3038,7 @@
                 <div style="font-weight: 500;">Auto-Update</div>
                 <div style="font-size: 12px; color: ${theme.textMuted}; margin-top: 2px;">Automatically check for and install updates</div>
               </div>
-              <input type="checkbox" id="autoUpdateCheck" ${state.data.settings?.autoUpdate !== false ? 'checked' : ''} style="accent-color: ${theme.accent}; width: 18px; height: 18px;" />
+              <input type="checkbox" id="autoUpdateCheck" ${state.data.settings?.autoUpdate === true ? 'checked' : ''} style="accent-color: ${theme.accent}; width: 18px; height: 18px;" />
             </label>
             <div id="updateStatusContainer" style="margin-top: 12px; padding: 12px 16px; background: ${theme.surfaceAlt}; border-radius: 8px; border: 1px solid ${theme.border};">
               ${state.updateStatus === 'available' ? `
@@ -2860,7 +3071,7 @@
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                   <div>
                     <div style="font-size: 13px; font-weight: 500;">Current Version</div>
-                    <div style="font-size: 12px; color: ${theme.textMuted};">v1.0.0</div>
+                    <div style="font-size: 12px; color: ${theme.textMuted};">v2.0.0</div>
                   </div>
                   <button id="checkUpdatesBtn" style="padding: 8px 16px; background: ${theme.elevated}; border: 1px solid ${theme.border}; border-radius: 6px; color: ${theme.text}; cursor: pointer; font-size: 12px; font-weight: 500;">${state.updateStatus === 'checking' ? 'Checking...' : 'Check for Updates'}</button>
                 </div>
@@ -2901,9 +3112,9 @@
           <div class="modal-overlay" style="position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 200;">
             <div style="background: ${theme.surface}; padding: 24px; border-radius: 12px; min-width: 360px; border: 1px solid ${theme.border};">
               <div style="font-size: 18px; font-weight: 600; margin-bottom: 20px;">Change Master Password</div>
-              <input type="password" id="currentPassInput" placeholder="Current password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px;" autofocus />
-              <input type="password" id="newPassInput" placeholder="New password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px;" />
-              <input type="password" id="confirmNewPassInput" placeholder="Confirm new password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 16px;" />
+              <input type="password" id="currentPassInput" placeholder="Current password" autocomplete="current-password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px;" autofocus />
+              <input type="password" id="newPassInput" placeholder="New password" autocomplete="new-password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px;" />
+              <input type="password" id="confirmNewPassInput" placeholder="Confirm new password" autocomplete="new-password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 16px;" />
               <div id="passwordError" style="display: none; padding: 10px 14px; background: ${theme.danger}15; border-radius: 8px; color: ${theme.danger}; font-size: 13px; margin-bottom: 16px;"></div>
               <div style="display: flex; gap: 8px;">
                 <button id="cancelModalBtn" style="flex: 1; padding: 9px 16px; background: ${theme.elevated}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; cursor: pointer; font-size: 13px; font-weight: 500;">Cancel</button>
@@ -2929,8 +3140,8 @@
               </label>
 
               <div id="exportPasswordFields" style="display: none;">
-                <input type="password" id="exportPassInput" placeholder="Backup password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px;" />
-                <input type="password" id="exportPassConfirmInput" placeholder="Confirm password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 16px;" />
+                <input type="password" id="exportPassInput" placeholder="Backup password" autocomplete="new-password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 12px;" />
+                <input type="password" id="exportPassConfirmInput" placeholder="Confirm password" autocomplete="new-password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 16px;" />
               </div>
 
               <div style="display: flex; gap: 8px;">
@@ -2947,10 +3158,65 @@
             <div style="background: ${theme.surface}; padding: 24px; border-radius: 12px; min-width: 360px; border: 1px solid ${theme.border};">
               <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Encrypted Backup</div>
               <div style="font-size: 13px; color: ${theme.textMuted}; margin-bottom: 20px;">Enter the password used to encrypt this backup</div>
-              <input type="password" id="importPassInput" placeholder="Backup password" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 16px;" autofocus />
+              <input type="password" id="importPassInput" placeholder="Backup password" autocomplete="off" style="width: 100%; padding: 11px 14px; background: ${theme.surfaceAlt}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; font-size: 14px; margin-bottom: 16px;" autofocus />
               <div style="display: flex; gap: 8px;">
                 <button id="cancelModalBtn" style="flex: 1; padding: 10px 16px; background: ${theme.elevated}; border: 1px solid ${theme.border}; border-radius: 8px; color: ${theme.text}; cursor: pointer; font-size: 13px; font-weight: 500;">Cancel</button>
                 <button id="confirmImportBtn" style="flex: 1; padding: 10px 16px; background: ${theme.accent}; border: none; border-radius: 8px; color: #fff; cursor: pointer; font-size: 13px; font-weight: 500;">Decrypt & Import</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+      if (state.showModal === 'auditLog') {
+        const severityColors = {
+          info: theme.accent,
+          warning: '#f59e0b',
+          critical: theme.danger
+        };
+        const entries = state.modalData?.entries || [];
+        return `
+          <div class="modal-overlay" style="position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 200;">
+            <div style="background: ${theme.surface}; padding: 24px; border-radius: 12px; min-width: 700px; max-width: 90vw; max-height: 80vh; border: 1px solid ${theme.border}; display: flex; flex-direction: column;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <div>
+                  <div style="font-size: 18px; font-weight: 600;">Security Audit Log</div>
+                  <div style="font-size: 12px; color: ${theme.textMuted}; margin-top: 4px;">${entries.length} event${entries.length !== 1 ? 's' : ''} recorded</div>
+                </div>
+                <button id="cancelModalBtn" style="background: none; border: none; color: ${theme.textMuted}; cursor: pointer; font-size: 24px;">&times;</button>
+              </div>
+
+              <div style="flex: 1; overflow-y: auto; margin-bottom: 16px;">
+                ${entries.length === 0 ? `
+                  <div style="text-align: center; padding: 60px 20px; color: ${theme.textMuted};">
+                    <div style="font-size: 48px; margin-bottom: 16px;">📋</div>
+                    <div style="font-size: 14px;">No audit log entries yet</div>
+                  </div>
+                ` : entries.map(entry => `
+                  <div style="padding: 14px; background: ${theme.elevated}; border-radius: 8px; margin-bottom: 10px; border-left: 3px solid ${severityColors[entry.severity] || theme.accent};">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                      <div style="flex: 1;">
+                        <div style="font-weight: 500; font-size: 13px; margin-bottom: 4px;">${escapeHtml(entry.event)}</div>
+                        <div style="font-size: 11px; color: ${theme.textMuted};">
+                          ${new Date(entry.timestamp).toLocaleString()}
+                        </div>
+                      </div>
+                      <div style="padding: 2px 8px; background: ${severityColors[entry.severity]}20; border-radius: 4px; font-size: 10px; font-weight: 600; color: ${severityColors[entry.severity]}; text-transform: uppercase;">
+                        ${entry.severity}
+                      </div>
+                    </div>
+                    ${Object.keys(entry.details || {}).length > 0 ? `
+                      <div style="font-size: 11px; color: ${theme.textFaint}; font-family: monospace; background: ${theme.surface}; padding: 8px; border-radius: 4px; overflow-x: auto;">
+                        ${Object.entries(entry.details).filter(([k,v]) => k !== 'timestamp').map(([k,v]) => `
+                          <span style="color: ${theme.textMuted};">${escapeHtml(k)}:</span> ${escapeHtml(String(v))}<br/>
+                        `).join('')}
+                      </div>
+                    ` : ''}
+                  </div>
+                `).join('')}
+              </div>
+
+              <div style="padding-top: 12px; border-top: 1px solid ${theme.border}; font-size: 11px; color: ${theme.textFaint};">
+                All audit log data is encrypted with your vault key and stored locally
               </div>
             </div>
           </div>
@@ -3055,9 +3321,16 @@
       unlockBtn?.addEventListener('click', async () => {
         const pass = passInput.value;
         if (state.setupMode) {
-          if (pass.length < 4) { showError('Password must be at least 4 characters'); return; }
           if (pass !== passConfirm?.value) { showError('Passwords do not match'); return; }
-          await setup(pass);
+
+          try {
+            const result = await setup(pass);
+            if (result === false) {
+              showError('Failed to create vault');
+            }
+          } catch (err) {
+            showError('Failed to create vault');
+          }
         } else {
           if (!await unlock(pass)) { showError('Incorrect password'); }
         }
@@ -3261,7 +3534,7 @@
         state.privateKey = '';
         state.selectedId = null;
         render();
-        showNotification('Private section locked', 'success');
+        showToast('Private section locked', 'success');
       });
       document.getElementById('privatePasswordInput')?.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
@@ -3315,7 +3588,7 @@
       document.getElementById('copyGenBtn')?.addEventListener('click', () => copyText(state.genResult));
       document.getElementById('useGenBtn')?.addEventListener('click', () => createPassword(state.genResult));
 
-      // File drop zone
+      // File drop zone (empty state)
       const dropZone = document.getElementById('fileDropZone');
       if (dropZone && state.section === 'files' && !state.showTrash) {
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.background = getTheme().accent + '10'; });
@@ -3324,6 +3597,36 @@
           e.preventDefault();
           dropZone.style.background = '';
           if (e.dataTransfer.files?.length > 0) processFiles(e.dataTransfer.files);
+        });
+      }
+
+      // File drop zone (detail view)
+      const fileDetailDropZone = document.getElementById('fileDetailDropZone');
+      if (fileDetailDropZone && state.section === 'files' && !state.showTrash) {
+        fileDetailDropZone.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          fileDetailDropZone.style.outline = '2px dashed ' + getTheme().accent;
+          fileDetailDropZone.style.outlineOffset = '-8px';
+          fileDetailDropZone.style.background = getTheme().accent + '08';
+        });
+        fileDetailDropZone.addEventListener('dragleave', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          fileDetailDropZone.style.outline = '';
+          fileDetailDropZone.style.outlineOffset = '';
+          fileDetailDropZone.style.background = '';
+        });
+        fileDetailDropZone.addEventListener('drop', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          fileDetailDropZone.style.outline = '';
+          fileDetailDropZone.style.outlineOffset = '';
+          fileDetailDropZone.style.background = '';
+          if (e.dataTransfer.files?.length > 0) {
+            processFiles(e.dataTransfer.files);
+            showToast(`Uploading ${e.dataTransfer.files.length} file(s)...`, 'success');
+          }
         });
       }
     };
@@ -3401,13 +3704,17 @@
       });
 
       // Open URL button
-      document.getElementById('openUrlBtn')?.addEventListener('click', () => {
+      document.getElementById('openUrlBtn')?.addEventListener('click', async () => {
         if (selected?.url) {
           let url = selected.url;
           if (!url.startsWith('http://') && !url.startsWith('https://')) {
             url = 'https://' + url;
           }
-          window.open(url, '_blank');
+          // Open in user's default browser
+          const result = await window.appInfo.openExternal(url);
+          if (result && !result.success) {
+            showToast('Failed to open URL', 'error');
+          }
         }
       });
 
@@ -3526,24 +3833,21 @@
           return;
         }
 
-        if (newPass.length < 4) {
-          if (errorEl) { errorEl.textContent = 'Password must be at least 4 characters'; errorEl.style.display = 'block'; }
+        // Use backend vault to change master password
+        const result = await window.vault.changeMasterPassword(currentPass, newPass);
+
+        if (!result.success) {
+          if (errorEl) {
+            errorEl.textContent = result.error || 'Failed to change password';
+            errorEl.style.display = 'block';
+          }
           return;
         }
 
-        const currentHash = await Crypto.hashPassword(currentPass);
-        if (currentHash !== state.data.masterPasswordHash) {
-          if (errorEl) { errorEl.textContent = 'Current password is incorrect'; errorEl.style.display = 'block'; }
-          return;
-        }
-
-        state.data.masterPasswordHash = await Crypto.hashPassword(newPass);
-        state.masterKey = newPass;
         state.showModal = null;
         state.modalData = {};
-        saveData();
         render();
-        showNotification('Master password changed successfully', 'success');
+        showToast('Master password changed successfully', 'success');
       });
 
       document.querySelectorAll('.template-btn').forEach(btn => {
@@ -3657,6 +3961,17 @@
         showToast(e.target.checked ? 'File encryption enabled' : 'File encryption disabled', 'success');
       });
 
+      document.getElementById('maxFileSizeSelect')?.addEventListener('change', (e) => {
+        updateSettings('maxFileSizeMB', parseInt(e.target.value));
+        showToast(`Max file size set to ${e.target.value} MB`, 'success');
+      });
+
+      document.getElementById('maxVaultSizeSelect')?.addEventListener('change', (e) => {
+        const value = parseInt(e.target.value);
+        updateSettings('maxVaultSizeMB', value);
+        showToast(`Max vault size set to ${value >= 1000 ? (value / 1000) + ' GB' : value + ' MB'}`, 'success');
+      });
+
       document.getElementById('enableVersioningCheck')?.addEventListener('change', (e) => {
         updateSettings('enableVersioning', e.target.checked);
         showToast(e.target.checked ? 'Version history enabled' : 'Version history disabled', 'success');
@@ -3727,37 +4042,92 @@
           window.autoUpdater.installUpdate();
         }
       });
+
+      // Audit log buttons
+      document.getElementById('viewAuditLogBtn')?.addEventListener('click', viewAuditLog);
+      document.getElementById('exportAuditLogBtn')?.addEventListener('click', exportAuditLog);
+      document.getElementById('clearAuditLogBtn')?.addEventListener('click', clearAuditLog);
+    };
+
+    // ============ AUDIT LOG FUNCTIONS ============
+    const viewAuditLog = async () => {
+      try {
+        const result = await window.auditLog.getEntries({ limit: 100 });
+        if (!result.success) {
+          showToast('Failed to load audit log', 'error');
+          return;
+        }
+
+        state.showModal = 'auditLog';
+        state.modalData = { entries: result.entries || [] };
+        render();
+      } catch (err) {
+        showToast('Failed to load audit log', 'error');
+      }
+    };
+
+    const exportAuditLog = async () => {
+      try {
+        const result = await window.auditLog.export();
+        if (!result.success) {
+          showToast('Failed to export audit log', 'error');
+          return;
+        }
+
+        const dateStr = new Date().toISOString().split('T')[0];
+        const blob = new Blob([result.data], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `eterna-audit-log-${dateStr}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+
+        showToast('Audit log exported successfully', 'success');
+      } catch (err) {
+        showToast('Failed to export audit log', 'error');
+      }
+    };
+
+    const clearAuditLog = () => {
+      showConfirm(
+        'Clear Audit Log',
+        'Are you sure you want to clear the entire audit log? This action cannot be undone.',
+        async () => {
+          const result = await window.auditLog.clear();
+          if (result.success) {
+            showToast('Audit log cleared successfully', 'success');
+          } else {
+            showToast('Failed to clear audit log', 'error');
+          }
+        }
+      );
     };
 
     // ============ INIT ============
     const init = async () => {
       try {
-        const res = await window.storage.get(STORAGE_KEY);
-        if (res?.value) {
-          const parsed = JSON.parse(res.value);
-          state.data = {
-            ...defaultData,
-            ...parsed,
-            totp: parsed.totp || [],
-            trash: parsed.trash || [],
-            fileLinks: parsed.fileLinks || [],
-            fileFolders: parsed.fileFolders || [],
-            settings: { ...defaultData.settings, ...(parsed.settings || {}) }
-          };
-          state.setupMode = !parsed.masterPasswordHash;
-          // Apply font size setting on load
-          if (state.data.settings?.fontSize) {
-            document.body.style.fontSize = state.data.settings.fontSize + 'px';
-          }
-        } else {
+        // Check if vault has been initialized
+        const { initialized } = await window.vault.isInitialized();
+
+        if (!initialized) {
+          // First time setup - show setup screen
           state.setupMode = true;
+          state.loaded = true;
+          render();
+          return;
         }
+
+        // Vault exists but is locked - show unlock screen
+        state.setupMode = false;
+        state.locked = true;
+        state.loaded = true;
+        render();
       } catch (err) {
-        console.error('Load error:', err);
+        console.error('Init error:', err);
         state.setupMode = true;
+        state.loaded = true;
+        render();
       }
-      state.loaded = true;
-      render();
     };
 
     init();
@@ -3783,9 +4153,9 @@
     }
 
     // ============ TRAY LOCK HANDLER ============
-    window.windowControls?.onLockVault?.(() => {
+    window.windowControls?.onLockVault?.(async () => {
       if (!state.locked) {
-        lock();
+        await lock();
       }
     });
 
@@ -3797,7 +4167,7 @@
       // Global shortcuts (work even when typing)
       if (e.ctrlKey && e.key === 'l') {
         e.preventDefault();
-        if (!state.locked) lock();
+        if (!state.locked) lock().catch(console.error);
         return;
       }
 

@@ -1,9 +1,9 @@
 {
-  "name": "eternavault",
-  "version": "1.0.0",
+  "name": "eterna",
+  "version": "2.0.0",
   "description": "Your personal fortress for digital privacy - secure journal, passwords, 2FA codes, and encrypted files",
   "main": "main.js",
-  "author": "EternaVault",
+  "author": "Eterna",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
@@ -19,37 +19,44 @@
     "electron-updater": "^6.7.3"
   },
   "build": {
-    "appId": "com.eternavault.app",
-    "productName": "EternaVault",
+    "appId": "com.eterna.app",
+    "productName": "Eterna",
     "directories": {
       "output": "dist"
     },
     "files": [
       "main.js",
       "preload.js",
+      "encryption.js",
+      "secure-memory.js",
+      "audit-log.js",
       "index.html",
       "jsqr.min.js",
+      "logo.svg",
       "icon.png",
       "tray-icon.png",
       "tray-icon@2x.png",
       "dev-app-update.yml"
     ],
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "EternaVault-Setup-${version}.exe"
+      "artifactName": "Eterna-Setup-${version}.exe"
     },
     "portable": {
-      "artifactName": "EternaVault-Portable.exe"
+      "artifactName": "Eterna-Portable.exe"
     },
     "publish": {
       "provider": "github",
       "owner": "wutev",
-      "repo": "eternavault",
+      "repo": "eterna",
       "releaseType": "release"
     }
   }
