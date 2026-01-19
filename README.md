@@ -1,6 +1,7 @@
 # Eterna
 
-A personal fortress for digital privacy. Securely store your journal entries, passwords, 2FA codes, and encrypted files - all protected by strong encryption.
+A secure, offline-first vault for your passwords, journals, 2FA codes, and sensitive files. Built with AES-256-GCM encryption and PBKDF2 key derivation to keep your data protected.
+
 
 ## Features
 
